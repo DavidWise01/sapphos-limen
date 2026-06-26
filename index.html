@@ -50,6 +50,9 @@
   button.tx:hover{background:rgba(194,85,127,.18)} button.tx:active{transform:translateY(1px)} button.tx.busy{opacity:.5;pointer-events:none}
   label.tempo{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--lead)}
   label.tempo input{vertical-align:middle;width:120px;accent-color:var(--murex)}
+  button.echo-btn{font-family:"IBM Plex Mono",monospace;font-size:11px;cursor:pointer;color:var(--verd);background:transparent;border:1px solid rgba(115,179,163,.4);border-radius:5px;padding:9px 12px}
+  button.echo-btn.off{color:var(--lead-dim);border-color:var(--line)}
+  .echohint{font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:var(--lead-dim);margin-top:8px;line-height:1.6}
 
   .limenline{margin-top:13px;font-family:"IBM Plex Mono",monospace;font-size:17px;line-height:1.95;color:var(--parch);word-break:break-word;min-height:24px}
   .limenline .w{padding:1px 2px;border-radius:3px}
@@ -88,7 +91,9 @@
     <div class="row">
       <button class="tx" id="send"><span>▶</span> send it through LIMEN</button>
       <label class="tempo">tempo <input id="tempo" type="range" min="80" max="200" value="132"></label>
+      <button class="echo-btn" id="echoBtn">◎ ternary echo: on</button>
     </div>
+    <div class="echohint">ternary echo — 3 voices panned <b>−/0/+</b> (left·centre·right), at triplet delays <b>1/3 · 2/3 · 2.99/3</b> of a beat, rotating every crossing; a rise echoes left→right, a fall right→left. Bidirectional, in threes.</div>
     <div class="lab" style="margin-top:16px">the LIMEN line · ⟨direction⟩⟨gate⟩«witness»</div>
     <div class="limenline" id="line"></div>
     <div class="stave" id="stave"></div>
@@ -158,22 +163,40 @@
       gloss:"…Sappho of Lesbos, the tenth (Muse).", src:"Plato (attrib.), Greek Anthology 9.506 — LATER, not a peer: the line that crowned her."}
   ];
 
-  // ── Web Audio · Karplus–Strong pluck ──
-  var ctx=null, master=null;
+  // ── Web Audio · Karplus–Strong pluck + the TERNARY ECHO ──
+  var ctx=null, master=null, echo=null, echoOn=true;
   function init(){ if(ctx) return; ctx=new (window.AudioContext||window.webkitAudioContext)();
     master=ctx.createGain(); master.gain.value=0.8;
     var conv=ctx.createConvolver(), rate=ctx.sampleRate, len=Math.floor(rate*1.6), ir=ctx.createBuffer(2,len,rate);
     for(var c=0;c<2;c++){var d=ir.getChannelData(c);for(var i=0;i<len;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/len,2.8);}
-    conv.buffer=ir; var wet=ctx.createGain(); wet.gain.value=0.20; var dry=ctx.createGain(); dry.gain.value=0.92;
-    master.connect(dry).connect(ctx.destination); master.connect(conv); conv.connect(wet).connect(ctx.destination); }
+    conv.buffer=ir; var wet=ctx.createGain(); wet.gain.value=0.14; var dry=ctx.createGain(); dry.gain.value=0.92;
+    master.connect(dry).connect(ctx.destination); master.connect(conv); conv.connect(wet).connect(ctx.destination);
+    echo=makeTernaryEcho(ctx, master); echo.setOn(echoOn); }
   function resume(){ if(ctx&&ctx.state==="suspended") ctx.resume(); }
+
+  // THE TERNARY ECHO — 3 delay voices (the trit), panned −/0/+ (bidirectional), at the
+  // three rotations of [1/3, 2/3, 2.99/3] of a beat; rotates per crossing, fall mirrors the pan.
+  var TROT=[[1/3,2/3,2.99/3],[2/3,2.99/3,1/3],[2.99/3,1/3,2/3]];
+  function makeTernaryEcho(ac, out){
+    var beat=0.5, input=ac.createGain(), fb=ac.createGain(), wet=ac.createGain(), taps=[];
+    fb.gain.value=0.30; wet.gain.value=0.6;
+    for(var i=0;i<3;i++){ var d=ac.createDelay(2.0); d.delayTime.value=TROT[0][i]*beat;
+      var tg=ac.createGain(); tg.gain.value=0.72-i*0.10; var p=ac.createStereoPanner?ac.createStereoPanner():null;
+      input.connect(d); if(p){ p.pan.value=[-1,0,1][i]; d.connect(p); p.connect(tg); } else d.connect(tg);
+      tg.connect(wet); tg.connect(fb); taps.push({delay:d,pan:p,gain:tg}); }
+    fb.connect(input); wet.connect(out);     // ternary recirculation = the tail (reverb-ish)
+    return { input:input, setBeat:function(b){ beat=b; },
+      setOn:function(v){ wet.gain.setTargetAtTime(v?0.6:0.0001, ac.currentTime, 0.02); },
+      rotateAt:function(t,r,dir){ var rot=TROT[((r%3)+3)%3], pans=dir==="fall"?[1,0,-1]:[-1,0,1];
+        for(var i=0;i<3;i++){ taps[i].delay.delayTime.setValueAtTime(rot[i]*beat,t); if(taps[i].pan) taps[i].pan.pan.setValueAtTime(pans[i],t); } } };
+  }
   function pluck(freq,t,dur,gain){ gain=gain||0.55; var rate=ctx.sampleRate,N=Math.max(2,Math.round(rate/freq)),
       L=Math.max(N+4,Math.floor(rate*dur)),buf=ctx.createBuffer(1,L,rate),d=buf.getChannelData(0);
     for(var i=0;i<N;i++) d[i]=Math.random()*2-1; var dec=0.9965;
     for(i=N;i<L;i++) d[i]=dec*0.5*(d[i-N]+d[i-N+1]);
     var s=ctx.createBufferSource(); s.buffer=buf; var g=ctx.createGain();
     g.gain.setValueAtTime(gain,t); g.gain.exponentialRampToValueAtTime(0.0006,t+dur);
-    s.connect(g).connect(master); s.start(t); s.stop(t+dur+0.02); }
+    s.connect(g); g.connect(master); if(echo) g.connect(echo.input); s.start(t); s.stop(t+dur+0.02); }
 
   // ── optical carrier ──
   var cv=document.getElementById("optic"), g=cv.getContext("2d"), CW=700, CH=220, pulses=[], phase=0, TRAVEL=1800;
@@ -236,8 +259,10 @@
   var sendBtn=document.getElementById("send");
   function transmit(){ if(!crossings.length) return; init(); resume(); sendBtn.classList.add("busy"); rxStarted=false;
     var tempo=parseInt(document.getElementById("tempo").value,10), unit=(60/tempo)*0.30, t0=ctx.currentTime+0.10, t=t0, slot=0, totalMs=0;
+    if(echo) echo.setBeat(60/tempo);
     crossings.forEach(function(cx,i){
       var L=METRE[slot%METRE.length], sd=unit*L, fr=voice(cx.dir,cx.gate);
+      if(echo) echo.rotateAt(t, slot, cx.dir);   // rotate the ternary echo + flip pan by direction
       fr.forEach(function(f,k){ pluck(f,t+k*unit*0.34,sd*1.25,k===0?0.6:0.42); });
       var delay=(t-t0)*1000;
       (function(idx,sl){ setTimeout(function(){ flash(idx); renderStave(sl%METRE.length); spawn(crossings[idx]); },delay); })(i,slot);
@@ -249,7 +274,8 @@
   function flash(i){ spans.forEach(function(s,k){ s.classList.toggle("lit",k===i); }); }
 
   sendBtn.addEventListener("click",transmit);
-  document.getElementById("tempo");
+  document.getElementById("echoBtn").addEventListener("click",function(){ echoOn=!echoOn; if(echo) echo.setOn(echoOn);
+    this.textContent="◎ ternary echo: "+(echoOn?"on":"off"); this.classList.toggle("off",!echoOn); });
   window.addEventListener("resize",fit);
   fit(); legend(); renderFrags(); showLetter(); requestAnimationFrame(drawOptic);
 })();
